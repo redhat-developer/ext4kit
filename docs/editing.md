@@ -26,7 +26,7 @@ ext4kit edit rootfs.img test -x /bin/sh
 | `write [-m MODE] [--owner UID[:GID]] HOST_FILE PATH` | Writes a host file, or stdin with `-`, to PATH, following symlinks. An existing file keeps its inode, hard links, timestamps and xattrs, and its mode and owner unless given. A new file is `0644 root:root` unless given. |
 | `cat PATH` | Prints a file to stdout, following symlinks. |
 | `test -e\|-f\|-d\|-x\|-L PATH` | Exits 0 when PATH exists / is a regular file / is a directory / has an execute bit / is itself a symlink, 1 when it does not, and 2 when the check failed (for example, the image cannot be opened). All but `-L` follow symlinks. |
-| `ln [-s] TARGET LINK` | Creates a symlink with `-s` (TARGET is stored as given and need not exist), otherwise a hard link to the existing non-directory TARGET. |
+| `ln [-s] TARGET LINK` | Creates a symlink with `-s` (TARGET is stored as given, must not be empty and need not exist), otherwise a hard link to the existing non-directory TARGET. |
 
 Image paths are absolute and split on `/` only. Symlinks are resolved inside
 the image, as in a chroot: an absolute target such as `/bin/busybox` means

@@ -209,6 +209,8 @@ fn failed_edits_report_errors_and_leave_a_clean_image() {
         &["write", &arg(&big), "/big.bin"],
         &["add", &arg(&big)],
         &["ln", "-s", "x", "/etc/passwd"],
+        // e2fsck reports a zero-length symlink as invalid.
+        &["ln", "-s", "", "/empty-link"],
     ] {
         let output = edit_output(&img, args);
         assert!(!output.status.success(), "edit {args:?} succeeded");
@@ -229,6 +231,7 @@ fn failed_edits_report_errors_and_leave_a_clean_image() {
     };
     assert!(!image.list("/").contains(&"big.bin".to_owned()));
     assert!(!image.list("/").contains(&"no".to_owned()));
+    assert!(!image.list("/").contains(&"empty-link".to_owned()));
 }
 
 #[test]

@@ -201,6 +201,14 @@ impl HostTree {
                         path.display()
                     )
                 })?;
+                // Reject what add_symlink would, before an import writes
+                // anything.
+                if target.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "symlink target must not be empty: {}",
+                        path.display()
+                    ));
+                }
                 if target.len() >= BLOCK_SIZE {
                     return Err(anyhow::anyhow!(
                         "symlink target must be no longer than {} bytes: {}",

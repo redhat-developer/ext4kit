@@ -21,8 +21,14 @@ impl Ext4ImageBuilder {
         let expansion_blocks = self.estimate_dir_expansion_blocks(parent, name)?;
 
         let target_bytes = target.as_bytes();
+        // The kernel refuses to create an empty symlink (ENOENT) and e2fsck
+        // reports a zero-length one as invalid, although ext2fs_symlink()
+        // itself would write it.
+        if target_bytes.is_empty() {
+            anyhow::bail!("symlink target must not be empty");
+        }
         // Match ext2fs_symlink(): the terminating NUL must fit in one block,
-        // so an empty target and targets up to BLOCK_SIZE - 1 bytes are valid.
+        // so targets may hold up to BLOCK_SIZE - 1 bytes.
         if target_bytes.len() >= BLOCK_SIZE {
             return Err(anyhow::anyhow!(
                 "symlink target must be no longer than {} bytes",
@@ -167,18 +173,17 @@ mod tests {
     }
 
     #[test]
-    fn symlink_target_may_be_empty_but_must_leave_room_for_nul() {
+    fn symlink_target_must_be_non_empty_and_leave_room_for_nul() {
         let mut builder = fresh_builder().expect("failed to create builder");
         let metadata = PosixMetadata::default();
         let free_inodes = builder.superblock.s_free_inodes_count;
+        let free_blocks = builder.superblock.s_free_blocks_count_lo;
 
-        let ino = builder
+        // e2fsck reports a zero-length symlink as invalid.
+        let error = builder
             .add_symlink(EXT4_ROOT_INO, "empty", "", &metadata)
-            .expect("e2fsprogs permits an empty symlink target");
-        let (group, index) = builder.inode_location(ino);
-        let empty_size = builder.groups[group].inode_table[index].i_size_lo;
-        assert_eq!(empty_size, 0);
-
+            .unwrap_err();
+        assert!(error.to_string().contains("must not be empty"), "{error}");
         assert!(
             builder
                 .add_symlink(
@@ -189,7 +194,24 @@ mod tests {
                 )
                 .is_err()
         );
-        let remaining_inodes = builder.superblock.s_free_inodes_count;
-        assert_eq!(remaining_inodes, free_inodes - 1);
+        assert_eq!({ builder.superblock.s_free_inodes_count }, free_inodes);
+        assert_eq!({ builder.superblock.s_free_blocks_count_lo }, free_blocks);
+        assert_eq!(
+            builder.lookup_dir_entry(EXT4_ROOT_INO, "empty").unwrap(),
+            None
+        );
+
+        // One byte is the shortest target, and BLOCK_SIZE - 1 the longest.
+        builder
+            .add_symlink(EXT4_ROOT_INO, "one", "x", &metadata)
+            .expect("a one-byte target is valid");
+        builder
+            .add_symlink(
+                EXT4_ROOT_INO,
+                "longest",
+                &"x".repeat(BLOCK_SIZE - 1),
+                &metadata,
+            )
+            .expect("a BLOCK_SIZE - 1 byte target is valid");
     }
 }

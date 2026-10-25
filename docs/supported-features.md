@@ -66,9 +66,11 @@ its four blocks are full, adding to it fails with an error. How many entries
 fit depends on name length, from about 1,000 short names down to about 60
 names of 255 bytes.
 
-Symlink targets may be empty and may contain at most `BLOCK_SIZE - 1` bytes
-(4,095 bytes with 4 KiB blocks). Targets under 60 bytes are inline; longer
-targets occupy one data block. Inline-data symlinks are not implemented.
+Symlink targets hold from 1 to `BLOCK_SIZE - 1` bytes (4,095 bytes with
+4 KiB blocks). An empty target is rejected, as `symlink(2)` does: e2fsck
+reports a zero-length symlink as invalid, and recent Linux kernels refuse to
+load one. Targets under 60 bytes are inline; longer targets occupy one data 
+block. Inline-data symlinks are not implemented.
 
 Device methods accept a Linux major number up to 4,095 and minor number up to
 1,048,575. Special nodes do not allocate data extents, though they may use an

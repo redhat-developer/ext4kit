@@ -155,7 +155,9 @@ pub fn apply_layer(builder: &mut Ext4ImageBuilder, reader: impl Read) -> Result<
                 let target = String::from_utf8(target)
                     .map_err(|_| anyhow::anyhow!("symlink target of {name:?} is not UTF-8"))?;
                 builder.remove_dir_entry(parent, name)?;
-                builder.add_symlink(parent, name, &target, &metadata)?;
+                builder
+                    .add_symlink(parent, name, &target, &metadata)
+                    .with_context(|| format!("cannot create symlink {}", path.join("/")))?;
             }
             EntryType::Link => {
                 // Hard-link names are rooted at the archive root, and tar
@@ -468,6 +470,35 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn empty_symlink_targets_are_rejected() {
+        // A plain header cannot carry an empty link name: tar reads it as
+        // missing.
+        let plain = apply_layer(
+            &mut builder(),
+            Cursor::new(layer(&[("etc/empty", EntryType::Symlink, b"")])),
+        )
+        .unwrap_err();
+        assert!(plain.to_string().contains("has no target"), "{plain:#}");
+
+        // A PAX linkpath record can, overriding the header's link name.  A
+        // record is "<length> <key>=<value>\n", its own length included.
+        let record = b"13 linkpath=\n";
+        let mut pax = Header::new_ustar();
+        pax.set_entry_type(EntryType::XHeader);
+        pax.set_path("PaxHeaders/empty").unwrap();
+        pax.set_size(record.len() as u64);
+        pax.set_cksum();
+        let mut bytes = pax.as_bytes().to_vec();
+        bytes.extend(record);
+        bytes.resize(1024, 0);
+        bytes.extend(layer(&[("etc/empty", EntryType::Symlink, b"placeholder")]));
+        let error = apply_layer(&mut builder(), Cursor::new(bytes)).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("etc/empty"), "{message}");
+        assert!(message.contains("must not be empty"), "{message}");
     }
 
     #[test]

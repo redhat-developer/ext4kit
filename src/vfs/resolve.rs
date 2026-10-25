@@ -78,13 +78,32 @@ impl Ext4ImageBuilder {
                     "too many levels of symbolic links resolving {path:?}"
                 ));
             }
-            let target = self.read_symlink(child)?;
-            match self.walk_path(stack, &target, hops)? {
+            match self.follow_symlink(stack, child, hops)? {
                 Some(resolved) => stack = resolved,
                 None => return Ok(None),
             }
         }
         Ok(Some(stack))
+    }
+
+    /// Walks the target of the symlink `link` from the directory chain
+    /// `stack` that holds it.  Returns the resolved chain, or `None` when
+    /// the link dangles.
+    fn follow_symlink(
+        &self,
+        stack: Vec<u32>,
+        link: u32,
+        hops: &mut usize,
+    ) -> Result<Option<Vec<u32>>> {
+        let target = self.read_symlink(link)?;
+        // An empty target is invalid: e2fsck flags it and recent Linux
+        // kernels refuse to load the inode ("invalid fast symlink length 0").
+        // Walking it would visit no component and land on the link's own
+        // parent, so it dangles.
+        if target.is_empty() {
+            return Ok(None);
+        }
+        self.walk_path(stack, &target, hops)
     }
 
     /// Resolves an absolute image path to an existing directory, following
@@ -152,16 +171,14 @@ impl Ext4ImageBuilder {
                 stack.push(child);
                 continue;
             }
-            if self.inode(child).file_type() == S_IFLNK {
-                let target = self.read_symlink(child)?;
-                if let Some(resolved) = self.walk_path(stack.clone(), &target, &mut 1)?
-                    && resolved
-                        .last()
-                        .is_some_and(|&inode| self.is_directory(inode))
-                {
-                    stack = resolved;
-                    continue;
-                }
+            if self.inode(child).file_type() == S_IFLNK
+                && let Some(resolved) = self.follow_symlink(stack.clone(), child, &mut 1)?
+                && resolved
+                    .last()
+                    .is_some_and(|&inode| self.is_directory(inode))
+            {
+                stack = resolved;
+                continue;
             }
             if !replace_non_directories {
                 return Err(anyhow::anyhow!(
@@ -266,6 +283,33 @@ mod tests {
         assert_eq!(builder.resolve_path("/bin/bash/x")?, None);
         // resolve_entry keeps the final symlink itself.
         assert_eq!(builder.resolve_entry("/bin/sh")?, Some(sh));
+        Ok(())
+    }
+
+    #[test]
+    fn empty_symlink_target_resolves_to_nothing() -> Result<()> {
+        let mut builder = builder()?;
+        let dir = builder.mkdir(EXT4_ROOT_INO, "dir", None)?;
+        // ext4kit no longer writes empty links, so build the fast symlink an
+        // older image may hold: a zero i_size and nothing inline.
+        let empty = builder.add_symlink(dir, "empty", "x", &PosixMetadata::default())?;
+        let inode = builder.inode_mut(empty);
+        inode.i_size_lo = 0;
+        inode.i_block = [0; 60];
+
+        // Walking "" would stop at the link's parent; the link dangles.
+        assert_eq!(builder.resolve_path("/dir/empty")?, None);
+        assert_eq!(builder.resolve_path("/dir/empty/x")?, None);
+        assert_eq!(builder.resolve_directory("/dir/empty")?, None);
+        assert_eq!(builder.resolve_entry("/dir/empty")?, Some(empty));
+
+        // ensure_directory treats it like any dangling link: an error, or
+        // replaced by a directory when replacing is allowed.
+        assert!(builder.ensure_directory("/dir/empty/x", false).is_err());
+        assert_eq!(builder.lookup_dir_entry(dir, "x")?, None);
+        let x = builder.ensure_directory("/dir/empty/x", true)?;
+        assert_eq!(builder.resolve_directory("/dir/empty/x")?, Some(x));
+        assert_eq!(builder.lookup_dir_entry(dir, "x")?, None);
         Ok(())
     }
 }
