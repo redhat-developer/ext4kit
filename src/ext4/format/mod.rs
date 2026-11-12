@@ -69,7 +69,14 @@ pub const EXT4_BG_BLOCK_UNINIT: u16 = 0x0002;
 pub const EXT4_BG_INODE_ZEROED: u16 = 0x0004;
 pub const EXT4_FEATURE_INCOMPAT_FILETYPE: u32 = 0x0002;
 pub const EXT4_FEATURE_INCOMPAT_EXTENTS: u32 = 0x0040;
+/// The kernel sets this incompat bit while a journal is active (mounted or
+/// crashed with replay pending) and clears it on clean unmount and on
+/// `fsfreeze`. `ext4_freeze` clears it after flushing the journal, so a
+/// frozen image reads it clear.
+pub const EXT4_FEATURE_INCOMPAT_RECOVER: u32 = 0x0004;
 pub const EXT4_FEATURE_COMPAT_EXT_ATTR: u32 = 0x0008;
+/// `has_journal`: the image carries a jbd2 journal in `s_journal_inum`.
+pub const EXT4_FEATURE_COMPAT_HAS_JOURNAL: u32 = 0x0004;
 pub const EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER: u32 = 0x0001;
 pub const EXT4_FEATURE_RO_COMPAT_LARGE_FILE: u32 = 0x0002;
 pub const EXT4_FEATURE_RO_COMPAT_DIR_NLINK: u32 = 0x0020;

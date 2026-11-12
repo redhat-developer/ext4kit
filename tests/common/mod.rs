@@ -46,7 +46,7 @@ pub fn arg(path: &Path) -> String {
 }
 
 /// The e2fsprogs installation used to inspect images.
-enum E2fsprogs {
+pub enum E2fsprogs {
     Native { sbin: Option<PathBuf> },
     Wsl { distro: String, sbin: String },
 }
@@ -85,11 +85,15 @@ impl E2fsprogs {
         // `wsl -e NAME` resolves bare names with a PATH that can lack
         // /usr/sbin even though the child environment contains it, so
         // later calls exec the absolute path instead.
+        // The probes retry WSL transport failures like every other call: the
+        // result is cached for the whole run, so one transient -1 here would
+        // otherwise silently skip every e2fsck check.
         let resolve = |distro: &str| -> Option<String> {
-            let output = Command::new("wsl")
-                .args(["-d", distro, "-e", "sh", "-c", "command -v e2fsck"])
-                .output()
-                .ok()?;
+            let output = try_output_with_retry(
+                Command::new("wsl").args(["-d", distro, "-e", "sh", "-c", "command -v e2fsck"]),
+                true,
+            )
+            .ok()?;
             if !output.status.success() {
                 return None;
             }
@@ -104,7 +108,7 @@ impl E2fsprogs {
             return resolve(&distro).map(|sbin| Self::Wsl { distro, sbin });
         }
         // `wsl -l` prints UTF-16LE; dropping NUL bytes is enough for distro names.
-        let listing = Command::new("wsl").args(["-l", "-q"]).output().ok()?;
+        let listing = try_output_with_retry(Command::new("wsl").args(["-l", "-q"]), true).ok()?;
         let listing: String = String::from_utf8_lossy(&listing.stdout)
             .chars()
             .filter(|&c| c != '\0')
@@ -121,7 +125,8 @@ impl E2fsprogs {
             })
     }
 
-    fn command(&self, program: &str) -> Command {
+    /// Spawns one e2fsprogs tool (`mkfs.ext4`, `dumpe2fs`, ...).
+    pub fn command(&self, program: &str) -> Command {
         match self {
             Self::Native { sbin } => Command::new(match sbin {
                 Some(dir) => dir.join(program),
@@ -137,7 +142,7 @@ impl E2fsprogs {
     }
 
     /// Converts a host path into the path the e2fsprogs tools see.
-    fn target(&self, image: &Path) -> String {
+    pub fn target(&self, image: &Path) -> String {
         match self {
             Self::Native { .. } => arg(image),
             Self::Wsl { distro, .. } => {
@@ -156,6 +161,16 @@ impl E2fsprogs {
     fn is_wsl(&self) -> bool {
         matches!(self, Self::Wsl { .. })
     }
+
+    /// The e2fsprogs directory as a shell prefix: `"/usr/sbin/"` when the
+    /// tools live in a known directory, `""` when they are only on PATH.
+    fn bin_prefix(&self) -> String {
+        match self {
+            Self::Native { sbin: Some(dir) } => format!("{}/", dir.display()),
+            Self::Native { sbin: None } => String::new(),
+            Self::Wsl { sbin, .. } => format!("{sbin}/"),
+        }
+    }
 }
 
 /// Runs `command`, retrying WSL transport failures. Under parallel test load
@@ -164,11 +179,20 @@ impl E2fsprogs {
 /// never exit -1, so the signature is unambiguous. Native runs pass `false`
 /// and never retry.
 fn output_with_retry(command: &mut Command, retry_wsl_failures: bool) -> std::process::Output {
+    try_output_with_retry(command, retry_wsl_failures).expect("failed to run e2fsprogs")
+}
+
+/// [`output_with_retry`] for probes, where a program that cannot be spawned
+/// at all (no `wsl` on PATH) is an answer rather than a test failure.
+fn try_output_with_retry(
+    command: &mut Command,
+    retry_wsl_failures: bool,
+) -> std::io::Result<std::process::Output> {
     let mut backoff = std::time::Duration::from_millis(500);
     for attempt in 0..3 {
-        let output = command.output().expect("failed to run e2fsprogs");
+        let output = command.output()?;
         if !retry_wsl_failures || output.status.code() != Some(-1) || attempt == 2 {
-            return output;
+            return Ok(output);
         }
         std::thread::sleep(backoff);
         backoff *= 2;
@@ -186,6 +210,75 @@ fn e2fsprogs() -> Option<&'static E2fsprogs> {
         eprintln!("note: e2fsprogs not found; skipping e2fsck/debugfs checks");
     }
     found
+}
+
+/// The raw e2fsprogs tool access, for tests that need more than
+/// [`Image`]: `command(program)` spawns a tool, `target(path)` converts a
+/// host path into the tool's view. Returns `None` like [`Image::check`]
+/// when e2fsprogs is unavailable.
+pub fn e2fsprogs_tools() -> Option<&'static E2fsprogs> {
+    e2fsprogs()
+}
+
+/// Runs one e2fsprogs tool with `args`, retrying WSL transport failures
+/// like [`Image::check`] does. Panics if the tool cannot run at all.
+pub fn run_tool(tools: &E2fsprogs, program: &str, args: &[&str]) -> std::process::Output {
+    let mut command = tools.command(program);
+    command.args(args);
+    output_with_retry(&mut command, tools.is_wsl())
+}
+
+/// Runs `sh -c SCRIPT` as root, for fixtures that need a loop mount (the
+/// mounted / frozen / synced journal states only the kernel produces).
+/// `${BIN}mkfs.ext4` inside the script expands to the located e2fsprogs
+/// tool (slash-terminated prefix, or empty when the tools are only on
+/// PATH); commands like `fsfreeze` come from util-linux, not e2fsprogs, so
+/// they are resolved by the shell's PATH like `mount` and `sync` — never
+/// prefixed with `${BIN}`.
+///
+/// On WSL this runs `wsl -u root`. Natively it runs the shell directly when
+/// already root, otherwise through passwordless `sudo -n`, so CI runners
+/// (GitHub Actions) run the fixtures too. A native machine with neither
+/// returns `None` with a note, so `cargo test` stays green for developers
+/// without passwordless sudo, unless `EXT4KIT_REQUIRE_E2FSPROGS` is set, in
+/// which case the missing root access fails the test instead.
+pub fn root_shell(tools: &E2fsprogs, script: &str) -> Option<std::process::Output> {
+    let script = script.replace("${BIN}", &tools.bin_prefix());
+    let mut command = match tools {
+        E2fsprogs::Wsl { distro, .. } => {
+            let mut command = Command::new("wsl");
+            command.args(["-d", distro, "-u", "root", "-e", "sh", "-c"]);
+            command
+        }
+        E2fsprogs::Native { .. } => {
+            let succeeds = |program: &str, args: &[&str]| {
+                Command::new(program)
+                    .args(args)
+                    .output()
+                    .is_ok_and(|output| output.status.success())
+            };
+            if succeeds("sh", &["-c", "test \"$(id -u)\" = 0"]) {
+                let mut command = Command::new("sh");
+                command.arg("-c");
+                command
+            } else if succeeds("sudo", &["-n", "true"]) {
+                let mut command = Command::new("sudo");
+                command.args(["-n", "sh", "-c"]);
+                command
+            } else {
+                if std::env::var_os("EXT4KIT_REQUIRE_E2FSPROGS").is_some() {
+                    panic!(
+                        "EXT4KIT_REQUIRE_E2FSPROGS is set but root fixtures need root \
+                         or passwordless sudo"
+                    );
+                }
+                eprintln!("note: no root or passwordless sudo; skipping loop-mount fixtures");
+                return None;
+            }
+        }
+    };
+    command.arg(&script);
+    Some(output_with_retry(&mut command, tools.is_wsl()))
 }
 
 /// An image produced by a test, inspected through e2fsprogs.

@@ -11,7 +11,7 @@ const EXT4_MAX_EXTENT_DEPTH: u16 = 5;
 
 /// Initialized extents are at most 32,768 blocks long; larger `ee_len`
 /// values encode an uninitialized extent of `ee_len - 32768` blocks.
-pub(super) const EXT_INIT_MAX_LEN: u16 = 1 << 15;
+pub(crate) const EXT_INIT_MAX_LEN: u16 = 1 << 15;
 
 /// Leaf extents and external index/leaf blocks reachable from an inode.
 #[derive(Default)]
@@ -49,7 +49,7 @@ pub(crate) fn extent_len(extent: &Ext4Extent) -> u32 {
 
 /// Mirrors ext2fs_extent_header_verify(): validates magic, entry count and
 /// `eh_max` against the node size (allowing room for a checksum tail).
-fn verify_extent_header(node: &[u8]) -> Result<Ext4ExtentHeader> {
+pub(crate) fn verify_extent_header(node: &[u8]) -> Result<Ext4ExtentHeader> {
     let header = node
         .get(..12)
         .and_then(|bytes| Ext4ExtentHeader::read_from_bytes(bytes).ok())

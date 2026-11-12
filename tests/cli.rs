@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{Image, arg, create, ext4kit};
+use common::{Image, arg, create, e2fsprogs_tools, ext4kit};
 use std::{fs, path::Path};
 use tempfile::TempDir;
 
@@ -160,6 +160,173 @@ fn created_images_carry_a_random_filesystem_uuid() {
         !uuid.chars().all(|c| c == '0'),
         "the UUID must not be all zeros: {stats}"
     );
+    // xxxxxxxx-xxxx-4xxx-…: the third group starts with the version digit.
+    assert_eq!(
+        uuid.as_bytes().get(14),
+        Some(&b'4'),
+        "a version-4 UUID like mke2fs writes: {uuid}"
+    );
+}
+
+/// The jsb decoder must agree with `dumpe2fs` on an image `mke2fs` made: a
+/// fresh journaled filesystem reports `Journal start: 0` and `needs_recovery`
+/// clear. Testing against a kernel-written jsb catches offset and endianness
+/// mistakes that a decode-what-we-encoded test cannot.
+#[test]
+fn reader_agrees_with_dumpe2fs_on_an_mke2fs_journal() {
+    use ext4kit::ext4::reader::ImageReader;
+
+    let Some(tools) = e2fsprogs_tools() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let image = tmp.path().join("j.img");
+    fs::write(&image, vec![0u8; 64 * 1024 * 1024]).unwrap();
+
+    // mkfs.ext4 writes a journaled filesystem with modern defaults ext4kit's
+    // fixed format does not carry (checksums, resize inodes, orphan file);
+    // ask mke2fs for the reader's own feature set so only the journal
+    // differs from an ext4kit image.
+    let target = tools.target(&image);
+    let output = common::run_tool(
+        tools,
+        "mkfs.ext4",
+        &[
+            "-q",
+            "-F",
+            "-O",
+            "^metadata_csum,^64bit,^flex_bg,^resize_inode,^orphan_file",
+            &target,
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "mkfs.ext4 failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // What dumpe2fs reports about the fresh journal.
+    let output = common::run_tool(tools, "dumpe2fs", &["-h", &target]);
+    let dump = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let journal_start = dump
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Journal start:"))
+        .map(str::trim)
+        .expect("dumpe2fs reports a Journal start");
+    let needs_recovery = dump.contains("needs_recovery");
+    assert_eq!(journal_start, "0", "{dump}");
+
+    // What the reader decodes from the same bytes. mke2fs also sets
+    // features the reader tolerates (extra ro_compat) or requires the same
+    // way; the state facts are what matters here.
+    let (reader, state) = ImageReader::open(&image).expect("the reader opens an mke2fs image");
+    assert!(state.has_journal, "{dump}");
+    assert!(state.journal_empty, "the reader must see the journal empty");
+    assert!(!state.mounted, "a fresh image has needs_recovery clear");
+    assert!(!needs_recovery, "{dump}");
+    assert_eq!(reader.recheck_state().unwrap(), state);
+}
+
+/// The full journal state machine on a kernel-mounted filesystem (the
+/// round-9 table, as fixtures): mounted with committed transactions (a
+/// write followed by `sync`), frozen, and cleanly unmounted. Each state is
+/// snapshotted to a host-side copy and cross-checked against `dumpe2fs -h`
+/// and the reader.
+///
+/// Needs root for the loop mount: on WSL through `wsl -u root`, natively
+/// as root or through passwordless `sudo -n` (as CI runners have), and
+/// skipped with a note otherwise (see `common::root_shell`). `fsfreeze`
+/// comes from util-linux, not e2fsprogs, so the script resolves it — like
+/// `mount` and `sync` — through the shell's PATH instead of the located
+/// e2fsprogs directory.
+#[test]
+fn reader_matches_the_journal_state_machine_of_a_mounted_filesystem() {
+    use ext4kit::ext4::reader::{ImageReader, ImageState};
+
+    let Some(tools) = e2fsprogs_tools() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let synced = tools.target(&tmp.path().join("synced.img"));
+    let frozen = tools.target(&tmp.path().join("frozen.img"));
+    let unmounted = tools.target(&tmp.path().join("unmounted.img"));
+    let script = format!(
+        "set -e\n\
+         umount /mnt/ext4kit-jsb 2>/dev/null || true\n\
+         mkdir -p /mnt/ext4kit-jsb\n\
+         rm -f /tmp/ext4kit-jsb.img\n\
+         dd if=/dev/zero of=/tmp/ext4kit-jsb.img bs=1M count=64 status=none\n\
+         ${{BIN}}mkfs.ext4 -q -F -O \
+         ^metadata_csum,^64bit,^flex_bg,^resize_inode,^orphan_file \
+         /tmp/ext4kit-jsb.img\n\
+         mount -o loop /tmp/ext4kit-jsb.img /mnt/ext4kit-jsb\n\
+         echo hi > /mnt/ext4kit-jsb/f.txt\n\
+         sync\n\
+         cp /tmp/ext4kit-jsb.img \"{synced}\"\n\
+         fsfreeze --freeze /mnt/ext4kit-jsb\n\
+         cp /tmp/ext4kit-jsb.img \"{frozen}\"\n\
+         fsfreeze --unfreeze /mnt/ext4kit-jsb\n\
+         umount /mnt/ext4kit-jsb\n\
+         cp /tmp/ext4kit-jsb.img \"{unmounted}\"\n\
+         rm -f /tmp/ext4kit-jsb.img"
+    );
+    let Some(output) = common::root_shell(tools, &script) else {
+        return;
+    };
+    assert!(
+        output.status.success(),
+        "the state-machine script failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // Each state: the reader and dumpe2fs must tell the same story.
+    // (mounted, journal_empty) from left: RECOVER set/clear, s_start
+    // non-zero/zero.
+    let expect = |copy: &Path, mounted: bool, journal_empty: bool| {
+        let (reader, state): (_, ImageState) =
+            ImageReader::open(copy).expect("the reader opens the state copy");
+        assert_eq!(state.mounted, mounted, "{:?}", state);
+        assert_eq!(state.journal_empty, journal_empty, "{:?}", state);
+        assert!(state.has_journal);
+        assert_eq!(reader.recheck_state().unwrap(), state);
+
+        let target = tools.target(copy);
+        let output = common::run_tool(tools, "dumpe2fs", &["-h", &target]);
+        let dump = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let start = dump
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("Journal start:"))
+            .map(str::trim)
+            .expect("dumpefs reports a Journal start");
+        assert_eq!(
+            start == "0",
+            journal_empty,
+            "dumpe2fs Journal start {start} vs reader journal_empty {journal_empty}: {dump}"
+        );
+        assert_eq!(
+            dump.contains("needs_recovery"),
+            mounted,
+            "dumpe2fs needs_recovery vs reader mounted {mounted}: {dump}"
+        );
+    };
+
+    let base = tmp.path();
+    // Write + sync: mounted, journal holds committed transactions.
+    expect(&base.join("synced.img"), true, false);
+    // fsfreeze: the journal is flushed and RECOVER clears while the VM runs.
+    expect(&base.join("frozen.img"), false, true);
+    // Clean unmount: same on-disk state as frozen.
+    expect(&base.join("unmounted.img"), false, true);
 }
 
 #[test]

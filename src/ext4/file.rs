@@ -18,7 +18,7 @@ fn set_block_sectors(inode: &mut Ext4Inode, sectors: u64) {
 }
 
 /// Returns a regular file's size from `i_size_lo` and `i_size_high`.
-fn file_size(inode: &Ext4Inode) -> u64 {
+pub(crate) fn file_size(inode: &Ext4Inode) -> u64 {
     u64::from(inode.i_size_lo) | (u64::from(inode.i_size_high) << 32)
 }
 
