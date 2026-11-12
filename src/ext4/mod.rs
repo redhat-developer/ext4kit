@@ -132,6 +132,10 @@ impl Ext4ImageBuilder {
         let total_inodes = inodes_per_group * block_groups_number;
 
         let mut superblock = Ext4SuperBlock::default();
+        // A random filesystem UUID, as mke2fs writes one, so later steps can
+        // tie a snapshot sidecar to exactly this image.
+        getrandom::fill(&mut superblock.s_uuid)
+            .expect("the operating system must provide random bytes for the ext4 UUID");
         // Calculate a random seed for the directory-index hashes
         let mut hash_seed_bytes = [0u8; 16];
         getrandom::fill(&mut hash_seed_bytes)
@@ -226,6 +230,40 @@ mod tests {
             builder.write_to_file(path.to_str().unwrap())?;
         }
         assert_eq!(std::fs::metadata(&path)?.len(), 16 * 1024 * 1024);
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn every_image_gets_a_distinct_nonzero_filesystem_uuid() -> anyhow::Result<()> {
+        let first = crate::ext4::test_support::fresh_builder()?;
+        let second = crate::ext4::test_support::fresh_builder()?;
+        assert_ne!(
+            first.superblock.s_uuid, [0u8; 16],
+            "the UUID must not stay zeroed"
+        );
+        assert_ne!(
+            first.superblock.s_uuid, second.superblock.s_uuid,
+            "two images must not share a UUID"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn open_round_trips_the_random_uuid() -> anyhow::Result<()> {
+        let path = std::env::temp_dir().join(format!("ext4kit-uuid-{}.img", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let uuid;
+        {
+            let mut builder = Ext4ImageBuilder::new_file(16, &path)?;
+            builder.create_root_dir()?;
+            builder.create_lost_and_found()?;
+            builder.reserve_inodes();
+            builder.write_to_file(path.to_str().unwrap())?;
+            uuid = builder.superblock.s_uuid;
+        }
+        let reopened = Ext4ImageBuilder::open(&path)?;
+        assert_eq!(reopened.superblock.s_uuid, uuid);
         std::fs::remove_file(path)?;
         Ok(())
     }
