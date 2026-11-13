@@ -26,6 +26,9 @@ elif command -v wsl >/dev/null 2>&1; then
     # Stop Git Bash from rewriting arguments that look like paths.
     export MSYS_NO_PATHCONV=1
     distro=${EXT4KIT_WSL_DISTRO:-}
+    # Set before the probe loop: with no candidate distro the loop never
+    # assigns it, and `set -u` would abort before the error below.
+    e2fsck_path=
     # `|| true` keeps a failed probe (distro without e2fsprogs) from
     # aborting the script under `set -e` + `pipefail`.
     resolve_e2fsck() {

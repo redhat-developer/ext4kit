@@ -23,6 +23,7 @@ mod inode;
 mod layout;
 use layout::PlannedGeometry;
 mod open;
+pub mod reader;
 mod special;
 mod symlink;
 pub use inode::PosixMetadata;
@@ -136,6 +137,11 @@ impl Ext4ImageBuilder {
         // tie a snapshot sidecar to exactly this image.
         getrandom::fill(&mut superblock.s_uuid)
             .expect("the operating system must provide random bytes for the ext4 UUID");
+        // Mark it an RFC 4122 version-4 (random) UUID, as libuuid's
+        // uuid_generate() does for mke2fs, so tools that decode the version
+        // see a well-formed UUID.
+        superblock.s_uuid[6] = (superblock.s_uuid[6] & 0x0f) | 0x40;
+        superblock.s_uuid[8] = (superblock.s_uuid[8] & 0x3f) | 0x80;
         // Calculate a random seed for the directory-index hashes
         let mut hash_seed_bytes = [0u8; 16];
         getrandom::fill(&mut hash_seed_bytes)
@@ -246,6 +252,9 @@ mod tests {
             first.superblock.s_uuid, second.superblock.s_uuid,
             "two images must not share a UUID"
         );
+        let uuid = first.superblock.s_uuid;
+        assert_eq!(uuid[6] >> 4, 4, "version 4 (random) UUID");
+        assert_eq!(uuid[8] >> 6, 0b10, "RFC 4122 variant");
         Ok(())
     }
 
