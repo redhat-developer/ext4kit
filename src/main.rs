@@ -608,7 +608,7 @@ fn parse_add(add: &str) -> anyhow::Result<Addition> {
             if source.is_empty() {
                 anyhow::bail!("add source cannot be empty");
             }
-            let source = PathBuf::from(source);
+            let source = PathBuf::from(normalize_verbatim_source(source));
             validate_add_source(&source)?;
             Ok(Addition {
                 source,
@@ -616,13 +616,24 @@ fn parse_add(add: &str) -> anyhow::Result<Addition> {
             })
         }
         None => {
-            let source = PathBuf::from(add);
+            let source = PathBuf::from(normalize_verbatim_source(add));
             validate_add_source(&source)?;
             Ok(Addition {
                 source,
                 destination: "/".to_owned(),
             })
         }
+    }
+}
+
+/// Rewrites `/` to `\` after a `\\?\` prefix. Verbatim paths reach the
+/// filesystem without Win32 normalization, where `/` is an ordinary
+/// filename byte, so `\\?\C:/dir` cannot be opened even though the same
+/// slashes are fine in `C:/dir` and get normalized in `//?/C:/dir`.
+fn normalize_verbatim_source(source: &str) -> String {
+    match source.strip_prefix(r"\\?\") {
+        Some(rest) if rest.contains('/') => format!(r"\\?\{}", rest.replace('/', "\\")),
+        _ => source.to_owned(),
     }
 }
 
@@ -955,7 +966,13 @@ mod tests {
     #[test]
     fn extended_windows_drive_path_is_not_a_destination_separator() {
         let addition = parse_add(r"\\?\C:/work/hosts").unwrap();
-        assert_eq!(addition.source, PathBuf::from(r"\\?\C:/work/hosts"));
+        assert_eq!(addition.source, PathBuf::from(r"\\?\C:\work\hosts"));
+        assert_eq!(addition.destination, "/");
+        let addition = parse_add(r"\\?\C:/work/hosts:/etc").unwrap();
+        assert_eq!(addition.source, PathBuf::from(r"\\?\C:\work\hosts"));
+        assert_eq!(addition.destination, "/etc");
+        let addition = parse_add(r"\\?\C:\work\hosts").unwrap();
+        assert_eq!(addition.source, PathBuf::from(r"\\?\C:\work\hosts"));
         assert_eq!(addition.destination, "/");
     }
 
