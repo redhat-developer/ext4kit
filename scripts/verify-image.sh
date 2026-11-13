@@ -26,19 +26,34 @@ elif command -v wsl >/dev/null 2>&1; then
     # Stop Git Bash from rewriting arguments that look like paths.
     export MSYS_NO_PATHCONV=1
     distro=${EXT4KIT_WSL_DISTRO:-}
+    # `|| true` keeps a failed probe (distro without e2fsprogs) from
+    # aborting the script under `set -e` + `pipefail`.
+    resolve_e2fsck() {
+        { wsl -d "$1" -e sh -c 'command -v e2fsck' 2>/dev/null || true; } | tr -d '\r\n'
+    }
     if [ -z "$distro" ]; then
         for candidate in $(wsl -l -q | tr -d '\r\0'); do
-            if wsl -d "$candidate" -e sh -c 'command -v e2fsck' >/dev/null 2>&1; then
+            e2fsck_path=$(resolve_e2fsck "$candidate")
+            if [ -n "$e2fsck_path" ]; then
                 distro=$candidate
                 break
             fi
         done
+    else
+        e2fsck_path=$(resolve_e2fsck "$distro")
     fi
-    [ -n "$distro" ] || {
+    [ -n "$e2fsck_path" ] || {
         echo "error: no WSL distribution has e2fsck (install e2fsprogs)" >&2
         exit 2
     }
-    run() { wsl -d "$distro" -e "$@"; }
+    # `wsl -e NAME` resolves NAME with a PATH that can lack /usr/sbin, while
+    # `sh -c` sees it; exec the absolute path the shell resolved.
+    sbin=$(dirname "$e2fsck_path")
+    run() {
+        local program=$1
+        shift
+        wsl -d "$distro" -e "$sbin/$program" "$@"
+    }
     windows_path=$(cygpath -m "$(realpath "$image")")
     target=$(wsl -d "$distro" -e wslpath -a "$windows_path" | tr -d '\r')
 else

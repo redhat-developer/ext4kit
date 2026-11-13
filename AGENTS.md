@@ -30,6 +30,11 @@ cargo run -- edit out.img <rm|mkdir|chmod|chown|add|write|cat|test|ln> ...
 bash scripts/verify-image.sh out.img ['debugfs request' ...]
 ```
 
+The compiler version is pinned in `rust-toolchain.toml`; rustup installs and
+activates it automatically for this directory, and CI installs exactly that
+version, so local runs and CI cannot diverge over std changes between minor
+releases. Bump the pin deliberately when adopting a new stable.
+
 Before you report a change as done, `cargo fmt --check`, `cargo test` and
 `cargo clippy --all-targets` must all pass, and clippy must report no
 warnings. Fix a lint rather than silencing it. Use `#[allow(clippy::…)]`

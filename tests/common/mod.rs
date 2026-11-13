@@ -48,7 +48,7 @@ pub fn arg(path: &Path) -> String {
 /// The e2fsprogs installation used to inspect images.
 enum E2fsprogs {
     Native { sbin: Option<PathBuf> },
-    Wsl { distro: String },
+    Wsl { distro: String, sbin: String },
 }
 
 impl E2fsprogs {
@@ -81,14 +81,27 @@ impl E2fsprogs {
     }
 
     fn wsl() -> Option<Self> {
-        let has_e2fsck = |distro: &str| {
-            Command::new("wsl")
+        // Resolve e2fsck through a shell and keep the directory it reports:
+        // `wsl -e NAME` resolves bare names with a PATH that can lack
+        // /usr/sbin even though the child environment contains it, so
+        // later calls exec the absolute path instead.
+        let resolve = |distro: &str| -> Option<String> {
+            let output = Command::new("wsl")
                 .args(["-d", distro, "-e", "sh", "-c", "command -v e2fsck"])
                 .output()
-                .is_ok_and(|output| output.status.success())
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            // Keep the directory as a plain string: joining with `PathBuf`
+            // on Windows would inject a `\` into the Linux path.
+            path.rsplit_once('/')
+                .map(|(dir, _)| dir.to_owned())
+                .filter(|dir| !dir.is_empty())
         };
         if let Ok(distro) = std::env::var("EXT4KIT_WSL_DISTRO") {
-            return has_e2fsck(&distro).then_some(Self::Wsl { distro });
+            return resolve(&distro).map(|sbin| Self::Wsl { distro, sbin });
         }
         // `wsl -l` prints UTF-16LE; dropping NUL bytes is enough for distro names.
         let listing = Command::new("wsl").args(["-l", "-q"]).output().ok()?;
@@ -100,9 +113,11 @@ impl E2fsprogs {
             .lines()
             .map(str::trim)
             .filter(|name| !name.is_empty())
-            .find(|name| has_e2fsck(name))
-            .map(|distro| Self::Wsl {
-                distro: distro.to_owned(),
+            .find_map(|name| {
+                resolve(name).map(|sbin| Self::Wsl {
+                    distro: name.to_owned(),
+                    sbin,
+                })
             })
     }
 
@@ -112,9 +127,10 @@ impl E2fsprogs {
                 Some(dir) => dir.join(program),
                 None => PathBuf::from(program),
             }),
-            Self::Wsl { distro } => {
+            Self::Wsl { distro, sbin } => {
                 let mut command = Command::new("wsl");
-                command.args(["-d", distro, "-e", program]);
+                command.args(["-d", distro, "-e"]);
+                command.arg(format!("{sbin}/{program}"));
                 command
             }
         }
@@ -124,11 +140,10 @@ impl E2fsprogs {
     fn target(&self, image: &Path) -> String {
         match self {
             Self::Native { .. } => arg(image),
-            Self::Wsl { distro } => {
-                let output = Command::new("wsl")
-                    .args(["-d", distro, "-e", "wslpath", "-a", &arg(image)])
-                    .output()
-                    .expect("failed to run wslpath");
+            Self::Wsl { distro, .. } => {
+                let mut command = Command::new("wsl");
+                command.args(["-d", distro, "-e", "wslpath", "-a", &arg(image)]);
+                let output = output_with_retry(&mut command, true);
                 assert!(output.status.success(), "wslpath failed: {output:?}");
                 String::from_utf8(output.stdout)
                     .expect("wslpath prints UTF-8")
@@ -137,6 +152,28 @@ impl E2fsprogs {
             }
         }
     }
+
+    fn is_wsl(&self) -> bool {
+        matches!(self, Self::Wsl { .. })
+    }
+}
+
+/// Runs `command`, retrying WSL transport failures. Under parallel test load
+/// the WSL service intermittently fails a client outright with exit code -1
+/// (`Wsl/Service/E_UNEXPECTED`, `0x8007274c` timeouts); the e2fsprogs tools
+/// never exit -1, so the signature is unambiguous. Native runs pass `false`
+/// and never retry.
+fn output_with_retry(command: &mut Command, retry_wsl_failures: bool) -> std::process::Output {
+    let mut backoff = std::time::Duration::from_millis(500);
+    for attempt in 0..3 {
+        let output = command.output().expect("failed to run e2fsprogs");
+        if !retry_wsl_failures || output.status.code() != Some(-1) || attempt == 2 {
+            return output;
+        }
+        std::thread::sleep(backoff);
+        backoff *= 2;
+    }
+    unreachable!()
 }
 
 fn e2fsprogs() -> Option<&'static E2fsprogs> {
@@ -164,11 +201,8 @@ impl Image {
         let tools = e2fsprogs()?;
         let target = tools.target(path);
         // -f forces a full check of a clean filesystem; -n opens it read-only.
-        let output = tools
-            .command("e2fsck")
-            .args(["-fn", &target])
-            .output()
-            .expect("failed to run e2fsck");
+        let mut command = tools.command("e2fsck");
+        let output = output_with_retry(command.args(["-fn", &target]), tools.is_wsl());
         assert!(
             output.status.success(),
             "e2fsck reported problems ({}):\n{}{}",
@@ -187,11 +221,8 @@ impl Image {
     /// separately for callers that expect them.
     pub fn debugfs_with_stderr(&self, request: &str) -> (String, String) {
         let tools = self.tools.expect("Image is only built with tools");
-        let output = tools
-            .command("debugfs")
-            .args(["-R", request, &self.target])
-            .output()
-            .expect("failed to run debugfs");
+        let mut command = tools.command("debugfs");
+        let output = output_with_retry(command.args(["-R", request, &self.target]), tools.is_wsl());
         assert!(output.status.success(), "debugfs {request:?}: {output:?}");
         let stderr = String::from_utf8_lossy(&output.stderr)
             .lines()
