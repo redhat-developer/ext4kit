@@ -140,6 +140,29 @@ fn single_file_lands_in_destination_directory() {
 }
 
 #[test]
+fn created_images_carry_a_random_filesystem_uuid() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("src");
+    fs::create_dir(&dir).unwrap();
+    fs::write(dir.join("a.txt"), "hi\n").unwrap();
+    let out = tmp.path().join("out.img");
+    create(&["--add", &format!("{}:/opt", arg(&dir))], &out);
+    let Some(image) = Image::check(&out) else {
+        return;
+    };
+    let stats = image.debugfs("stats");
+    let uuid = stats
+        .lines()
+        .find_map(|line| line.strip_prefix("Filesystem UUID:"))
+        .map(str::trim)
+        .expect("debugfs stats reports a filesystem UUID");
+    assert!(
+        !uuid.chars().all(|c| c == '0'),
+        "the UUID must not be all zeros: {stats}"
+    );
+}
+
+#[test]
 fn large_directory_gets_an_htree_index() {
     let tmp = TempDir::new().unwrap();
     let big = tmp.path().join("big");
