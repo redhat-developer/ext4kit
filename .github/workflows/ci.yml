@@ -20,9 +20,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # Installs the toolchain pinned in rust-toolchain.toml, including the
+      # components listed there; runner images ship rustup already.
+      - run: rustup toolchain install --profile minimal --no-self-update
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --all-targets
@@ -38,7 +38,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup toolchain install --profile minimal --no-self-update
       - uses: Swatinem/rust-cache@v2
       - name: Install e2fsprogs
         if: runner.os == 'Linux'
@@ -58,7 +58,7 @@ jobs:
       EXT4KIT_REQUIRE_E2FSPROGS: "1"
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup toolchain install --profile minimal --no-self-update
       - uses: Swatinem/rust-cache@v2
       - name: Install e2fsprogs
         run: |

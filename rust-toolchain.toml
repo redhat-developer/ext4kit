@@ -1,0 +1,9 @@
+# Pinned so local builds, CI and releases all use the same compiler. Std
+# changes between minor releases (for example the Path parsing of \\?\
+# verbatim paths in 1.100) otherwise let tests pass locally while CI fails.
+# rustup installs and activates this toolchain automatically, both for
+# `cargo` in this directory and for the CI step that runs
+# `rustup toolchain install` with no arguments.
+[toolchain]
+channel = "1.100.0"
+components = ["rustfmt", "clippy"]
