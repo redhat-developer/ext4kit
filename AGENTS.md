@@ -74,7 +74,7 @@ The library is layered; a module uses only the layers above it:
 | `src/vfs/edit.rs` | Path-level edits with coreutils semantics (`remove_path`, `make_directory`, `chmod_path`, `chown_path`, `write_path`, `test_path`, ...) behind `ext4kit edit` |
 | `src/host/` | Host directory import (`dua-core` walk) and sizing; `tree.rs` is the pre-scanned `HostTree` arena |
 | `src/host/git/` | The git machinery folder tracking drives: command hygiene and env scrubbing (`mod.rs`), `Repo`, tree listings, dirty paths and label refs (`repo.rs`), the check-attr batch and conversion routes (`attrs.rs`), git's eol/binary heuristics and the spool (`text.rs`), the `ExactLen` framing writer (`exact_len.rs`), the persistent check-ignore session (`check_ignore.rs`), cat-file/hash-object (`objects.rs`), the fast-import stream writer (`fast_import.rs`) |
-| `src/tracked/` | The tracked-folder layer, reading images only through `ext4::reader::ImageReader`: the sidecar (`sidecar.rs`), name classification (`names.rs`), the image walk (`scan.rs`), and `commit.rs`, which turns a scan into the base (and later head) commits |
+| `src/tracked/` | The tracked-folder layer, reading images only through `ext4::reader::ImageReader`: the sidecar (`sidecar.rs`), name classification (`names.rs`), the image walk (`scan.rs`), `commit.rs`, which turns a scan into the base (and later head) commits, and `create.rs`, the create-time gates, repository discovery and retirement of old tracking |
 | `src/oci/` | Tar layer application with whiteouts (`mod.rs`), registry pulls (`remote.rs`), Docker/Podman engines (`local.rs`) |
 | `src/main.rs` | Thin clap CLI: argument parsing, sizing and orchestration only. Filesystem logic belongs in the library |
 

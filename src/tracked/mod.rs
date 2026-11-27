@@ -9,6 +9,7 @@
 //! snapshot plan's threat model.
 
 pub mod commit;
+pub mod create;
 pub mod names;
 pub mod scan;
 pub mod sidecar;
